@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
+import fs from 'node:fs/promises';
 
-const app=express(), port=Number(process.env.PORT||8787), cache=new Map(), TTL=15000;
+const app=express(), port=Number(process.env.PORT||8787), cache=new Map();
+const TTL=30*60*1000, STALE_TTL=24*60*60*1000, CACHE_FILE='./fixture-cache.json';
 app.disable('x-powered-by');
 app.use(cors({origin:process.env.ALLOWED_ORIGIN||false}));
 app.use(express.json({limit:'32kb'}));
@@ -16,10 +18,28 @@ const mapFixture=item=>{
 app.get('/health',(_req,res)=>res.json({ok:true,service:'SkorAtlas API'}));
 app.get('/v1/football/matches/today',async(_req,res)=>{
   if(!process.env.API_FOOTBALL_KEY)return res.status(503).json({error:'Lisanslı veri anahtarı yapılandırılmadı.'});
-  const date=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Istanbul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()), key=`fixtures:${date}`, hit=cache.get(key);
-  if(hit&&Date.now()-hit.at<TTL)return res.json({matches:hit.matches});
-  try{const response=await fetch(`https://v3.football.api-sports.io/fixtures?date=${date}&timezone=Europe%2FIstanbul`,{headers:{'x-apisports-key':process.env.API_FOOTBALL_KEY}});if(!response.ok)throw new Error(`Provider ${response.status}`);const data=await response.json(),matches=(data.response||[]).map(mapFixture);cache.set(key,{at:Date.now(),matches});res.set('Cache-Control','public, max-age=10');return res.json({matches});}
-  catch(error){console.error('Provider error:',error instanceof Error?error.message:error);return res.status(502).json({error:'Canlı skor sağlayıcısına ulaşılamadı.'});}
+  const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Istanbul',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+  const get=type=>parts.find(x=>x.type===type)?.value;
+  const date=`${get('year')}-${get('month')}-${get('day')}`, key=`fixtures:${date}`;
+  let hit=cache.get(key);
+  if(!hit){try{const saved=JSON.parse(await fs.readFile(CACHE_FILE,'utf8'));if(saved?.key===key&&Array.isArray(saved.matches)){hit={at:saved.at,matches:saved.matches};cache.set(key,hit)}}catch{}}
+  if(hit&&hit.matches.length&&Date.now()-hit.at<TTL){res.set('Cache-Control','public, max-age=60');return res.json({matches:hit.matches,cached:true});}
+  try{
+    const response=await fetch(`https://v3.football.api-sports.io/fixtures?date=${date}&timezone=Europe%2FIstanbul`,{headers:{'x-apisports-key':process.env.API_FOOTBALL_KEY}});
+    if(!response.ok)throw new Error(`Provider HTTP ${response.status}`);
+    const data=await response.json();
+    const providerErrors=data?.errors&&Object.keys(data.errors).length?JSON.stringify(data.errors):'';
+    if(providerErrors)throw new Error(`Provider: ${providerErrors}`);
+    const matches=(data.response||[]).map(mapFixture);
+    if(!matches.length)throw new Error(`Provider ${date} için boş liste döndürdü`);
+    const saved={key,at:Date.now(),matches};cache.set(key,saved);await fs.writeFile(CACHE_FILE,JSON.stringify(saved)).catch(()=>{});
+    res.set('Cache-Control','public, max-age=60');return res.json({matches,cached:false});
+  }
+  catch(error){
+    console.error('Provider error:',error instanceof Error?error.message:error);
+    if(hit&&hit.matches.length&&Date.now()-hit.at<STALE_TTL)return res.json({matches:hit.matches,cached:true,stale:true});
+    return res.status(503).json({error:'Günlük canlı skor kotası doldu veya sağlayıcı geçici olarak yanıt vermiyor. Daha sonra tekrar deneyin.'});
+  }
 });
 app.use((_req,res)=>res.status(404).json({error:'Bulunamadı'}));
 app.listen(port,()=>console.log(`SkorAtlas API :${port}`));

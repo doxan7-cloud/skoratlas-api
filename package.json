@@ -1,0 +1,1 @@
+{"name":"skoratlas-api","version":"1.0.0","private":true,"type":"module","scripts":{"start":"node index.js","check":"node --check index.js"},"dependencies":{"cors":"^2.8.5","dotenv":"^17.2.2","express":"^5.1.0"}}
